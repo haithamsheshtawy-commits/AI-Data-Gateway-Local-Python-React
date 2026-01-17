@@ -27,6 +27,7 @@ const upload = multer({ storage: storage });
 
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Store the last uploaded CSV file path for code execution
 let lastUploadedCSVPath = null;
@@ -166,25 +167,265 @@ app.post("/api/execute-code", (req, res) => {
       .json({ error: "Language must be 'python' or 'javascript'" });
   }
 
+  const timestamp = Date.now();
+
   // Replace file references in code with actual CSV path
   let modifiedCode = code;
+  const outputDir = path.join(__dirname, "uploads");
+  const chartFilename = `chart_${timestamp}.png`;
+  const chartPath = path.join(outputDir, chartFilename);
+
   if (lastUploadedCSVPath) {
-    // Replace common file references with the actual CSV path
-    modifiedCode = code
-      .replace(/open\(['"]file\.csv['"]\)/g, `open('${lastUploadedCSVPath}')`)
-      .replace(/open\(['"][^'"]*\.csv['"]\)/g, `open('${lastUploadedCSVPath}')`)
+    // Replace ALL CSV file references with the actual uploaded CSV path
+    // This catches: open('file.csv'), pd.read_csv('...'), variable = '...', etc.
+    modifiedCode = modifiedCode
+      .replace(/open\(['"][^'"]*\.csv['"]/g, `open('${lastUploadedCSVPath}'`)
       .replace(
-        /read_csv\(['"]file\.csv['"]\)/g,
-        `read_csv('${lastUploadedCSVPath}')`,
+        /read_csv\(['"][^'"]*\.csv['"]/g,
+        `read_csv('${lastUploadedCSVPath}'`,
       )
-      .replace(
-        /read_csv\(['"][^'"]*\.csv['"]\)/g,
-        `read_csv('${lastUploadedCSVPath}')`,
+      .replace(/=\s*['"][^'"]*\.csv['"]/g, `= '${lastUploadedCSVPath}'`);
+
+    console.log(`Replaced CSV paths with: ${lastUploadedCSVPath}`);
+  }
+
+  // Auto-convert csv module code to pandas with visualization
+  if (
+    language === "python" &&
+    code.includes("csv") &&
+    !code.includes("pandas") &&
+    !code.includes("matplotlib") &&
+    !code.includes("plt.")
+  ) {
+    const csvToPandasWrapper = `
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Original CSV code
+${modifiedCode}
+
+# Convert collected data to pandas DataFrame for visualization
+try:
+    if 'data' in locals() and isinstance(data, list) and len(data) > 0:
+        df = pd.DataFrame(data)
+        print(f"\\n📊 Loaded {len(df)} rows and {len(df.columns)} columns from CSV")
+        print(f"Columns: {', '.join(df.columns.tolist())}")
+        print(f"\\nFirst 10 rows:")
+        print(df.head(10).to_string())
+        
+        # Limit to reasonable size for visualization
+        viz_df = df.head(50) if len(df) > 50 else df
+        
+        # Get numeric columns for pie chart
+        numeric_cols = viz_df.select_dtypes(include=['number']).columns.tolist()
+        
+        if len(numeric_cols) >= 1:
+            # Use first non-numeric column as index if available
+            non_numeric = [c for c in viz_df.columns if c not in numeric_cols]
+            if non_numeric:
+                viz_df = viz_df.set_index(non_numeric[0])
+                numeric_cols = [c for c in numeric_cols if c in viz_df.columns]
+            
+            # Create pie chart(s)
+            if len(numeric_cols) > 1:
+                num_cols = len(numeric_cols)
+                num_rows = (num_cols + 1) // 2
+                fig, axes = plt.subplots(num_rows, 2, figsize=(16, 6 * num_rows))
+                fig.suptitle('Pie Charts - Data Visualization', fontsize=18, fontweight='bold', y=0.995)
+                
+                axes_flat = axes.flatten() if num_rows > 1 else ([axes] if num_cols == 1 else axes)
+                
+                for idx, col in enumerate(numeric_cols):
+                    ax_current = axes_flat[idx] if num_cols > 1 else axes_flat[0]
+                    values = viz_df[col].dropna()
+                    
+                    if len(values) > 0 and values.sum() > 0:
+                        ax_current.pie(values, labels=values.index, autopct='%1.1f%%', 
+                                      startangle=90, counterclock=False, 
+                                      colors=plt.cm.Set3.colors)
+                        ax_current.set_title(f'{col}', fontsize=14, fontweight='bold', pad=15)
+                    else:
+                        ax_current.text(0.5, 0.5, f'No data for {col}', 
+                                       ha='center', va='center', fontsize=12)
+                        ax_current.set_xlim(-1, 1)
+                        ax_current.set_ylim(-1, 1)
+                
+                for idx in range(num_cols, len(axes_flat)):
+                    axes_flat[idx].axis('off')
+            else:
+                fig, ax = plt.subplots(figsize=(12, 8))
+                values = viz_df[numeric_cols[0]].dropna()
+                
+                if len(values) > 0 and values.sum() > 0:
+                    ax.pie(values, labels=values.index, autopct='%1.1f%%', 
+                          startangle=90, counterclock=False,
+                          colors=plt.cm.Set3.colors)
+                    ax.set_title(f'Pie Chart - {numeric_cols[0]}', fontsize=16, fontweight='bold', pad=20)
+                else:
+                    ax.text(0.5, 0.5, 'No data available', ha='center', va='center', fontsize=14)
+            
+            plt.tight_layout()
+            plt.savefig('${chartPath}', bbox_inches='tight', dpi=150)
+            plt.close()
+            print("\\n✓ Pie chart generated successfully")
+        else:
+            print("\\n✗ No numeric columns found for pie chart")
+    else:
+        print("\\n✗ No data variable found or data is empty")
+except Exception as e:
+    print(f"\\n✗ Visualization error: {str(e)}")
+`;
+    modifiedCode = csvToPandasWrapper;
+    console.log(
+      `CSV to pandas conversion enabled with pie chart: ${chartPath}`,
+    );
+  }
+
+  // Auto-generate chart visualization for pandas DataFrames
+  if (
+    language === "python" &&
+    code.includes("pandas") &&
+    !code.includes("matplotlib") &&
+    !code.includes("plt.") &&
+    !code.includes("csv")
+  ) {
+    // Wrap the code to capture and visualize the last DataFrame result
+    const vizWrapper = `
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Store the last DataFrame result
+_last_df = None
+
+# Original code with result capture
+${modifiedCode}
+
+# Auto-visualize if we have DataFrame output
+try:
+    # Try to find a DataFrame in locals
+    _dfs = [v for v in locals().values() if isinstance(v, pd.DataFrame) and not v.empty]
+    
+    if _dfs:
+        _last_df = _dfs[-1]  # Get the last DataFrame
+        print(f"\\n📊 Found DataFrame with {len(_last_df)} rows and {len(_last_df.columns)} columns")
+        print(f"Columns: {', '.join(_last_df.columns.tolist())}")
+        print(f"\\nFirst 10 rows:")
+        print(_last_df.head(10).to_string())
+        
+        # Limit to reasonable size for visualization
+        if len(_last_df) > 50:
+            _last_df = _last_df.head(50)
+            print(f"\\n(Limited to first 50 rows for visualization)")
+        
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        # Check if suitable for pie chart
+        numeric_cols = _last_df.select_dtypes(include=['number']).columns.tolist()
+        
+        if len(numeric_cols) >= 1:
+            # Use first column as index if not already set meaningfully
+            if _last_df.index.name is None and len(_last_df.columns) > len(numeric_cols):
+                non_numeric = [c for c in _last_df.columns if c not in numeric_cols]
+                if non_numeric:
+                    _last_df = _last_df.set_index(non_numeric[0])
+                    numeric_cols = [c for c in numeric_cols if c in _last_df.columns]
+            
+            # Create pie chart(s)
+            if len(numeric_cols) > 1:
+                # Multiple numeric columns - create subplots for each
+                num_cols = len(numeric_cols)
+                num_rows = (num_cols + 1) // 2
+                fig, axes = plt.subplots(num_rows, 2, figsize=(16, 6 * num_rows))
+                fig.suptitle('Pie Charts - Data Visualization', fontsize=18, fontweight='bold', y=0.995)
+                
+                # Flatten axes array for easier iteration
+                if num_cols == 1:
+                    axes = [axes]
+                elif num_rows == 1:
+                    axes = axes
+                else:
+                    axes = axes.flatten()
+                
+                for idx, col in enumerate(numeric_cols):
+                    ax_current = axes[idx] if num_cols > 1 else ax
+                    values = _last_df[col].dropna()
+                    
+                    # Only plot if we have positive values
+                    if len(values) > 0 and values.sum() > 0:
+                        ax_current.pie(values, labels=values.index, autopct='%1.1f%%', 
+                                      startangle=90, counterclock=False, 
+                                      colors=plt.cm.Set3.colors)
+                        ax_current.set_title(f'{col}', fontsize=14, fontweight='bold', pad=15)
+                    else:
+                        ax_current.text(0.5, 0.5, f'No data for {col}', 
+                                       ha='center', va='center', fontsize=12)
+                        ax_current.set_xlim(-1, 1)
+                        ax_current.set_ylim(-1, 1)
+                
+                # Hide extra subplots if odd number of columns
+                for idx in range(num_cols, len(axes)):
+                    axes[idx].axis('off')
+            else:
+                # Single numeric column - one pie chart
+                values = _last_df[numeric_cols[0]].dropna()
+                
+                if len(values) > 0 and values.sum() > 0:
+                    ax.pie(values, labels=values.index, autopct='%1.1f%%', 
+                          startangle=90, counterclock=False,
+                          colors=plt.cm.Set3.colors)
+                    ax.set_title(f'Pie Chart - {numeric_cols[0]}', fontsize=16, fontweight='bold', pad=20)
+                else:
+                    ax.text(0.5, 0.5, 'No data available', ha='center', va='center', fontsize=14)
+                    ax.set_xlim(-1, 1)
+                    ax.set_ylim(-1, 1)
+            
+            plt.tight_layout()
+            plt.savefig('${chartPath}', bbox_inches='tight', dpi=150)
+            plt.close()
+            print("\\n✓ Chart generated successfully")
+        else:
+            print("\\n✗ No numeric columns found for visualization")
+except Exception as e:
+    print(f"\\n✗ Chart generation error: {str(e)}")
+`;
+    modifiedCode = vizWrapper;
+    console.log(`Auto-chart generation enabled for: ${chartPath}`);
+  }
+
+  // Add chart saving code for Python with matplotlib
+  if (
+    language === "python" &&
+    (code.includes("matplotlib") || code.includes("plt."))
+  ) {
+    // Inject Agg backend at the very beginning to prevent display issues
+    const backendCode = "import matplotlib\nmatplotlib.use('Agg')\n";
+
+    // Add backend before any matplotlib imports
+    if (modifiedCode.includes("import matplotlib")) {
+      modifiedCode = backendCode + modifiedCode;
+    } else if (modifiedCode.includes("from matplotlib")) {
+      modifiedCode = backendCode + modifiedCode;
+    }
+
+    // First, replace any plt.show() with savefig
+    if (code.includes("plt.show()")) {
+      modifiedCode = modifiedCode.replace(
+        /plt\.show\(\)/g,
+        `plt.savefig('${chartPath}', bbox_inches='tight', dpi=150)\nplt.close()`,
       );
+    } else {
+      // If no plt.show() found, add savefig at the end
+      modifiedCode += `\nplt.savefig('${chartPath}', bbox_inches='tight', dpi=150)\nplt.close()`;
+    }
+
+    console.log(`Chart will be saved to: ${chartPath}`);
   }
 
   let command;
-  const timestamp = Date.now();
   const tempFilePath = path.join(__dirname, "uploads", `temp_${timestamp}`);
 
   if (language === "python") {
@@ -221,7 +462,20 @@ app.post("/api/execute-code", (req, res) => {
       const output =
         stdout || stderr || "Code executed successfully (no output)";
       console.log("Execution complete");
-      res.json({ output });
+
+      // Check if chart file was created
+      const chartUrl = fs.existsSync(chartPath)
+        ? `http://localhost:${PORT}/uploads/${chartFilename}`
+        : null;
+
+      console.log(`Chart file exists: ${fs.existsSync(chartPath)}`);
+      console.log(`Chart URL: ${chartUrl}`);
+
+      res.json({
+        output,
+        chartUrl,
+        chartFilename: chartUrl ? chartFilename : null,
+      });
     },
   );
 });
