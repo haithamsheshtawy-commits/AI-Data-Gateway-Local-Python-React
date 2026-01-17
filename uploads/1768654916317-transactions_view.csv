@@ -1,0 +1,6 @@
+transaction_id,user_name,email,card_number,amount,date
+1,Alice,alice@mail.com,1111-2222-3333-4444,100,2026-01-01
+2,Bob,bob@mail.com,2222-3333-4444-5555,250,2026-01-02
+3,Charlie,charlie@mail.com,3333-4444-5555-6666,75,2026-01-03
+4,David,david@mail.com,4444-5555-6666-7777,300,2026-01-04
+5,Eve,eve@mail.com,5555-6666-7777-8888,50,2026-01-05
