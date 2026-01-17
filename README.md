@@ -1,6 +1,7 @@
 # Mistral 7B Local Interface
 
 A local web interface for interacting with the Mistral 7B model using mlx_lm. Built with React frontend and Express backend.
+fully local
 
 ## Features
 
