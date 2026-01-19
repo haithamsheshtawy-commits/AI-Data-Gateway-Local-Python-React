@@ -32,37 +32,68 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 // Store the last uploaded CSV file path for code execution
 let lastUploadedCSVPath = null;
 
-// Endpoint to generate response from Mistral model
-app.post("/api/generate", (req, res) => {
+// Helper function to generate response from a model
+const generateFromModel = (modelPath, prompt, maxTokens = 500) => {
+  return new Promise((resolve, reject) => {
+    const mlxCommand =
+      "/Users/tapteam/Documents/AI/apple_llama/mlx-env/bin/mlx_lm.generate";
+    const command = `${mlxCommand} --model "${modelPath}" --max-tokens ${maxTokens} --prompt "${prompt.replace(/"/g, '\\"')}"`;
+
+    console.log(`Executing command for ${modelPath}:`, command);
+
+    exec(command, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Error with ${modelPath}:`, error);
+        reject(error);
+      } else {
+        if (stderr) {
+          console.error("stderr:", stderr);
+        }
+        console.log(`Response from ${modelPath}:`, stdout);
+        resolve(stdout);
+      }
+    });
+  });
+};
+
+// Endpoint to generate response from both Llama and Mistral models
+app.post("/api/generate", async (req, res) => {
   const { prompt } = req.body;
 
   if (!prompt) {
     return res.status(400).json({ error: "Prompt is required" });
   }
 
-  const modelPath =
+  const mistralPath =
     "/Users/tapteam/Documents/AI/apple_llama/models/mistral-7b-instruct-mlx";
-  const mlxCommand =
-    "/Users/tapteam/Documents/AI/apple_llama/mlx-env/bin/mlx_lm.generate";
-  const command = `${mlxCommand} --model "${modelPath}" --max-tokens 500 --prompt "${prompt.replace(/"/g, '\\"')}"`;
+  const llamaPath =
+    "/Users/tapteam/Documents/AI/apple_llama/models/Meta-Llama-3-8B-Instruct";
 
-  console.log("Executing command:", command);
+  try {
+    // Run both models in parallel
+    const [mistralResponse, llamaResponse] = await Promise.all([
+      generateFromModel(mistralPath, prompt).catch((err) => ({
+        error: err.message,
+      })),
+      generateFromModel(llamaPath, prompt).catch((err) => ({
+        error: err.message,
+      })),
+    ]);
 
-  exec(command, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-    if (error) {
-      console.error("Error:", error);
-      return res
-        .status(500)
-        .json({ error: "Failed to generate response", details: error.message });
-    }
-
-    if (stderr) {
-      console.error("stderr:", stderr);
-    }
-
-    console.log("Response:", stdout);
-    res.json({ response: stdout });
-  });
+    res.json({
+      mistral: typeof mistralResponse === "string" ? mistralResponse : null,
+      llama: typeof llamaResponse === "string" ? llamaResponse : null,
+      mistralError:
+        typeof mistralResponse === "object" ? mistralResponse.error : null,
+      llamaError:
+        typeof llamaResponse === "object" ? llamaResponse.error : null,
+    });
+  } catch (err) {
+    console.error("Generation Error:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to generate response", details: err.message });
+  }
 });
 
 // Helper function to parse CSV file
@@ -114,37 +145,47 @@ File Summary:
 
 Please provide detailed insights based on this data.`;
 
-    const modelPath =
+    const mistralPath =
       "/Users/tapteam/Documents/AI/apple_llama/models/mistral-7b-instruct-mlx";
-    const mlxCommand =
-      "/Users/tapteam/Documents/AI/apple_llama/mlx-env/bin/mlx_lm.generate";
-    const command = `${mlxCommand} --model "${modelPath}" --max-tokens 500 --prompt "${prompt.replace(/"/g, '\\"')}"`;
+    const llamaPath =
+      "/Users/tapteam/Documents/AI/apple_llama/models/Meta-Llama-3-8B-Instruct";
 
-    console.log("Analyzing CSV files with LLM...");
+    console.log("Analyzing CSV with both LLMs...");
 
     // Store the file path for later code execution
     lastUploadedCSVPath = req.file.path;
 
-    exec(command, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-      // Don't delete uploaded file yet - keep it for code execution
-
-      if (error) {
-        console.error("Error:", error);
-        return res.status(500).json({
-          error: "Failed to analyze CSV",
-          details: error.message,
-          basicAnalysis,
-        });
-      }
+    try {
+      // Run both models in parallel
+      const [mistralResponse, llamaResponse] = await Promise.all([
+        generateFromModel(mistralPath, prompt).catch((err) => ({
+          error: err.message,
+        })),
+        generateFromModel(llamaPath, prompt).catch((err) => ({
+          error: err.message,
+        })),
+      ]);
 
       console.log("Analysis complete");
       res.json({
-        response: stdout,
+        mistral: typeof mistralResponse === "string" ? mistralResponse : null,
+        llama: typeof llamaResponse === "string" ? llamaResponse : null,
+        mistralError:
+          typeof mistralResponse === "object" ? mistralResponse.error : null,
+        llamaError:
+          typeof llamaResponse === "object" ? llamaResponse.error : null,
         basicAnalysis,
         dataPreview: data.slice(0, 10),
-        fullData: data, // Send full data for chart processing
+        fullData: data,
       });
-    });
+    } catch (error) {
+      console.error("Error:", error);
+      res.status(500).json({
+        error: "Failed to analyze CSV",
+        details: error.message,
+        basicAnalysis,
+      });
+    }
   } catch (error) {
     console.error("CSV Analysis Error:", error);
     res
